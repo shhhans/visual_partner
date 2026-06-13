@@ -3,6 +3,7 @@
 import os
 
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")  # 可选；未配置时 web_search 降级 DuckDuckGo
 
 # OpenAI 兼容接口（LLM / VL 走这里，便于后续切 MiniMax 做 A/B）
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
