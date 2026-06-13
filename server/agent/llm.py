@@ -16,9 +16,9 @@ from typing import AsyncIterator
 from openai import AsyncOpenAI
 
 from agent.tools import TOOLS, execute_tool
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, LLM_MODEL
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-_client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+_client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 MAX_REACT_STEPS = 5
 

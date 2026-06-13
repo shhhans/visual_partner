@@ -12,9 +12,9 @@ import uuid
 
 from openai import AsyncOpenAI
 
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, VL_MODEL
+from config import VL_API_KEY, VL_BASE_URL, VL_MODEL
 
-_vl_client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+_vl_client = AsyncOpenAI(api_key=VL_API_KEY, base_url=VL_BASE_URL)
 
 _VL_CACHE_TTL = 8.0   # 同一帧 N 秒内复用 VL 结果（成本策略 C8）
 _FRAME_TIMEOUT = 5.0  # 前端抓帧最长等待时间
