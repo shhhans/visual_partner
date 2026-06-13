@@ -28,6 +28,7 @@ let speaker = null;
 let micHandle = null;     // startMic() 返回的 {stop()} 句柄
 let userLine = null;      // 当前用户句的字幕节点（partial 持续覆写）
 let assistantLine = null; // 当前助手回复的字幕节点（delta 持续追加）
+let toolCards = {};       // call_id → 工具卡片节点，用于 tool_result 回填
 
 function addLine(role) {
   const div = document.createElement('div');
@@ -35,6 +36,64 @@ function addLine(role) {
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   return div;
+}
+
+// ReAct 工具可视化：图标/中文名 + 入参友好摘要（设计见对话流内联卡片）
+const TOOL_META = {
+  look_at_camera: { icon: '📷', label: '查看摄像头' },
+  get_datetime:   { icon: '🕐', label: '查询时间' },
+  calculate:      { icon: '🧮', label: '计算' },
+  get_weather:    { icon: '🌤️', label: '查询天气' },
+  web_search:     { icon: '🔍', label: '联网搜索' },
+};
+
+function summarizeArgs(name, args) {
+  switch (name) {
+    case 'look_at_camera': return args.question || '';
+    case 'calculate':      return args.expression || '';
+    case 'get_weather':    return args.city || '';
+    case 'web_search':     return args.query || '';
+    default:               return '';
+  }
+}
+
+// 全程用 DOM 构建，不用 innerHTML：入参/结果均为不可信文本，避免 XSS
+function addToolCard(msg) {
+  const meta = TOOL_META[msg.name] || { icon: '🔧', label: msg.name };
+  const card = document.createElement('div');
+  card.className = 'tool-card pending';
+  card.dataset.callId = msg.call_id;
+  card.dataset.tool = msg.name;
+
+  const head = document.createElement('div');
+  head.className = 'tool-head';
+  head.append(spanEl('tool-icon', meta.icon), spanEl('tool-label', meta.label));
+  const summary = summarizeArgs(msg.name, msg.arguments);
+  if (summary) head.append(spanEl('tool-arg', summary));
+  card.append(head);
+
+  // VL 卡片预留缩略图槽，由后续 capture 事件填入实际抓帧
+  if (msg.name === 'look_at_camera') {
+    const img = document.createElement('img');
+    img.className = 'tool-thumb'; // 故意不设 src，capture 时再填，便于 :not([src]) 选中
+    card.append(img);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  body.textContent = '处理中…';
+  card.append(body);
+
+  transcriptEl.appendChild(card);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  return card;
+}
+
+function spanEl(cls, text) {
+  const s = document.createElement('span');
+  s.className = cls;
+  s.textContent = text;
+  return s;
 }
 
 function onMessage(event) {
@@ -76,14 +135,42 @@ function onMessage(event) {
       speaker.flush(msg.gen);
       if (assistantLine) assistantLine.classList.add('interrupted');
       assistantLine = null;
+      // 未完成的工具卡片随回复一起标记中断（结果已不会再回来）
+      transcriptEl.querySelectorAll('.tool-card.pending').forEach((c) => {
+        c.classList.replace('pending', 'interrupted');
+        c.querySelector('.tool-body').textContent = '（已中断）';
+      });
+      toolCards = {};
       break;
     case 'metrics':
       renderMetrics(msg);
       break;
-    case 'capture':
-      // 视觉链路：服务端索取一帧（ReAct 工具触发）
-      ws.send(JSON.stringify({ type: 'frame', id: msg.id, data: captureFrame(videoEl) }));
+    case 'tool_call':
+      // ReAct：工具开始执行，插入卡片占位
+      toolCards[msg.call_id] = addToolCard(msg);
+      assistantLine = null; // 工具调用后续的回复另起一行
       break;
+    case 'tool_result': {
+      // ReAct：工具结果回填对应卡片
+      const card = toolCards[msg.call_id];
+      if (card) {
+        card.classList.replace('pending', 'done');
+        card.querySelector('.tool-body').textContent = msg.content;
+        delete toolCards[msg.call_id];
+      }
+      break;
+    }
+    case 'capture': {
+      // 视觉链路：服务端索取一帧（ReAct 工具触发）
+      const b64 = captureFrame(videoEl);
+      ws.send(JSON.stringify({ type: 'frame', id: msg.id, data: b64 }));
+      // 把实际抓到的这一帧贴进等待中的 VL 卡片缩略图槽
+      const slot = transcriptEl.querySelector(
+        '.tool-card[data-tool="look_at_camera"].pending img.tool-thumb:not([src])'
+      );
+      if (slot) slot.src = `data:image/jpeg;base64,${b64}`;
+      break;
+    }
     case 'error':
       statusEl.textContent = `出错：${msg.message}`;
       break;

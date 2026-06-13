@@ -9,6 +9,7 @@
 两者在同一轮 LLM 响应中互斥，不会同时出现。
 """
 
+import asyncio
 import json
 from typing import AsyncIterator
 
@@ -85,17 +86,37 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
             ],
         })
 
-        # 并发执行所有工具（本轮可能有多个 tool_call）
-        import asyncio
-        async def _run(acc):
+        # 先解析参数并通知前端"工具调用开始"（ReAct 可视化）。
+        # 带 call_id（=tool_call_id）供前端精确关联 result；带 gen 供 barge-in 时清理。
+        gen = getattr(session, "_reply_gen", 0)
+        parsed: list[tuple[dict, dict]] = []
+        for acc in tc_acc.values():
             try:
                 args = json.loads(acc["arguments"] or "{}")
             except json.JSONDecodeError:
                 args = {}
+            parsed.append((acc, args))
+            await session._send_json({
+                "type": "tool_call",
+                "call_id": acc["id"],
+                "name": acc["name"],
+                "arguments": args,
+                "gen": gen,
+            })
+
+        # 并发执行所有工具（本轮可能有多个 tool_call），结果回来即推前端
+        async def _run(acc, args):
             result = await execute_tool(acc["name"], args, session)
+            await session._send_json({
+                "type": "tool_result",
+                "call_id": acc["id"],
+                "name": acc["name"],
+                "content": result,
+                "gen": gen,
+            })
             return {"role": "tool", "tool_call_id": acc["id"], "content": result}
 
-        tool_msgs = await asyncio.gather(*[_run(acc) for acc in tc_acc.values()])
+        tool_msgs = await asyncio.gather(*[_run(acc, args) for acc, args in parsed])
         working.extend(tool_msgs)
 
     # 到达最大步数上限，强制最终回答（不带工具）
