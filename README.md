@@ -14,6 +14,7 @@
 ```
 
 - 语音链路：`docs/voice-pipeline.md`
+- 语音链路复盘（对照 deep-research，待办缺口 + 延迟埋点说明）：`docs/voice-pipeline-review.md`
 - 视觉链路：`docs/vision-pipeline.md`
 - ReAct 链路：`docs/react-pipeline.md`
 - 设计文档（用户故事 / 成本控制）：`docs/design-doc.md`
@@ -27,7 +28,20 @@ cp .env.example .env   # 然后填入 API key
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-浏览器打开 http://localhost:8000 ，授权摄像头与麦克风后即可对话。
+浏览器打开 http://localhost:8000 （必须用 `localhost`，getUserMedia 要求安全上下文），授权摄像头与麦克风后即可对话。
+
+## 延迟观测
+
+每个回合的延迟会落库并实时显示，方便对照 `docs/voice-pipeline-review.md` 里的延迟预算调参：
+
+- **前端面板**：聊天区下方一行显示本回合 `turn_closure / ttft / tts_first / e2e_first_audio / total`（回合结束后出现）。
+- **落库**：`server/metrics.db`（SQLite，进程启动自建，已 gitignore）。一回合一行，被打断的回合也记录。
+
+```bash
+sqlite3 server/metrics.db "select turn_index, turn_closure_ms, ttft_ms, e2e_first_audio_ms, total_ms, interrupted from turns order by id desc limit 10;"
+```
+
+> 注：尚未采集 token / 计费用量，面板「字数」为回复字符数而非 token。
 
 ## 配置供应商（.env）
 
@@ -49,6 +63,7 @@ server/
   app.py            FastAPI 入口，托管静态页 + /ws WebSocket
   config.py         模型名、采样率等集中配置
   session.py        每连接的会话编排（语音/视觉/ReAct 的粘合层）
+  metrics.py        每回合延迟指标采集 + SQLite 落库（metrics.db）
   voice/asr.py      流式 ASR 封装（DashScope SDK 回调 → asyncio 队列）
   voice/tts.py      流式 TTS 封装（CosyVoice）
   agent/llm.py      LLM 流式调用（OpenAI 兼容接口）
