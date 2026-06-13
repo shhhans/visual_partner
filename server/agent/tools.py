@@ -1,6 +1,5 @@
-"""ReAct 工具定义（骨架）。实现计划见 docs/react-pipeline.md。"""
+"""ReAct 工具定义与执行。视觉按需化是核心成本策略：闲聊时零视觉开销。"""
 
-# 视觉按需化是核心成本策略：模型自行决定何时调用，闲聊时零视觉开销
 LOOK_AT_CAMERA = {
     "type": "function",
     "function": {
@@ -23,5 +22,10 @@ TOOLS = [LOOK_AT_CAMERA]
 
 
 async def execute_tool(name: str, arguments: dict, session) -> str:
-    """TODO(vision): 取帧 → qwen-vl 定向描述 → 返回文本。见 server/vision/frame.py"""
-    raise NotImplementedError(name)
+    if name == "look_at_camera":
+        question = arguments.get("question", "画面里有什么")
+        frame_b64 = await session.frames.request_frame(session.ws, session._ws_lock)
+        if frame_b64 is None:
+            return "摄像头画面暂时不可用，请确认摄像头已开启。"
+        return await session.frames.describe(frame_b64, question)
+    return f"未知工具：{name}"

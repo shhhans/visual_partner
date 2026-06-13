@@ -84,9 +84,8 @@ class Session:
 
     async def _on_json(self, data: dict) -> None:
         if data.get("type") == "frame":
-            # 视觉链路：前端回传的抓帧，存最近一帧供 look_at_camera 用
-            self.frames.latest_b64 = data.get("data")
-            self.frames.latest_ts = asyncio.get_running_loop().time()
+            # 视觉链路：前端回传的抓帧，resolve 等待中的 future 并更新缓存
+            self.frames.receive_frame(data.get("id", ""), data.get("data", ""))
 
     # ---------- ASR 事件 ----------
 
@@ -138,7 +137,7 @@ class Session:
         # 通知客户端新回复开始，客户端应冲掉上一轮残余音频
         await self._send_json({"type": "start", "gen": gen})
         try:
-            async for delta in stream_chat(self.history):
+            async for delta in stream_chat(self.history, session=self):
                 if self._metrics is not None:
                     if self._metrics.t_ttft is None:
                         self._metrics.t_ttft = self._now()
