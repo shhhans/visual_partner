@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时产物：延迟指标库由进程启动时自建，不入库
+server/metrics.db
+
+# 环境与密钥（API key 走环境变量，仓库内不应出现）
+.env
+*.local

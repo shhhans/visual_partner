@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Visual Partner — AI 视觉对话助手</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <section class="video-pane">
+      <video id="camera" autoplay playsinline muted></video>
+      <div id="status" class="status">点击「开始对话」授权摄像头与麦克风</div>
+    </section>
+    <section class="chat-pane">
+      <div id="transcript" class="transcript"></div>
+      <div id="metrics" class="metrics"></div>
+      <button id="start-btn">开始对话</button>
+    </section>
+  </main>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
