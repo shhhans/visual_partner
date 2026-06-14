@@ -60,18 +60,41 @@ def _insert(kind: str, content: str, session_id: str) -> None:
         _conn.commit()
 
 
-def _query(text: str, limit: int) -> list[str]:
+def _build_match(text: str) -> str:
+    """把检索文本构造成 FTS5 MATCH 表达式：重叠 3 字窗各成短语，OR 起来。
+
+    为什么不是「整句当一个短语」：那等于要求事实是问句的子串，自然问句
+    （「你还记得我喜欢喝什么」）永远匹配不到事实（「用户喜欢喝咖啡」）——方向反了。
+    改成「任一 3 字片段命中即算相关」，靠 FTS rank(bm25) 把重叠多的事实排前，
+    自然问句即可召回共享片段的事实。
+
+    已知边界（trigram 固有）：只能匹配 >=3 字连续重叠；1-2 字的语义关键词
+    （「猫」「项目」）抓不到。更强的语义召回需 embeddings，留作后续。
+    每个 3 字窗用双引号包成短语并转义内部引号，规避 FTS5 语法字符注入/报错。
+    """
+    compact = "".join(text.split())
+    if len(compact) < 3:
+        return ""  # 不足 3 字，trigram 无从匹配
+    grams = {compact[i : i + 3] for i in range(len(compact) - 2)}
+    return " OR ".join('"' + g.replace('"', '""') + '"' for g in grams)
+
+
+def _query(text: str, limit: int, kind: str | None) -> list[str]:
     init_db()
     assert _conn is not None
-    # FTS5 MATCH 对原始用户输入不安全（特殊语法字符会报错）：用双引号包成短语，
-    # 并转义内部双引号，把输入当纯文本短语匹配。
-    phrase = '"' + text.replace('"', '""') + '"'
+    match = _build_match(text)
+    if not match:
+        return []
+    sql = "SELECT content FROM memory WHERE memory MATCH ?"
+    params: list = [match]
+    if kind is not None:
+        # kind 是 UNINDEXED 列，可在 WHERE 里与 MATCH 并用做过滤。
+        sql += " AND kind = ?"
+        params.append(kind)
+    sql += " ORDER BY rank LIMIT ?"
+    params.append(limit)
     with _lock:
-        cur = _conn.execute(
-            "SELECT content FROM memory WHERE memory MATCH ? "
-            "ORDER BY rank LIMIT ?",
-            (phrase, limit),
-        )
+        cur = _conn.execute(sql, params)
         return [row[0] for row in cur.fetchall()]
 
 
@@ -80,8 +103,8 @@ async def add(kind: str, content: str, session_id: str) -> None:
     await asyncio.to_thread(_insert, kind, content, session_id)
 
 
-async def search(text: str, limit: int = 5) -> list[str]:
-    """按全文相关度召回记忆内容（slice 2 接入回复链路）。"""
+async def search(text: str, limit: int = 5, kind: str | None = None) -> list[str]:
+    """按全文相关度召回记忆内容。kind 非空时只召回该类（'fact' / 'episode'）。"""
     if not text.strip():
         return []
-    return await asyncio.to_thread(_query, text, limit)
+    return await asyncio.to_thread(_query, text, limit, kind)

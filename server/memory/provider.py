@@ -21,8 +21,8 @@ class MemoryProvider(ABC):
         """把一个已完成回合落入长期记忆（回合结束后由后台 worker 调用）。"""
 
     @abstractmethod
-    async def recall(self, query: str, limit: int = 5) -> list[str]:
-        """按相关度召回记忆（slice 2 接入回复链路做 prefetch 回灌）。"""
+    async def recall(self, query: str, limit: int = 5, kind: str | None = None) -> list[str]:
+        """按相关度召回记忆，回复前注入 prompt。kind 限定类别（'fact' / 'episode'）。"""
 
 
 class SqliteMemoryProvider(MemoryProvider):
@@ -41,5 +41,5 @@ class SqliteMemoryProvider(MemoryProvider):
         for fact in facts:
             await sqlite_fts.add("fact", fact, session_id)
 
-    async def recall(self, query: str, limit: int = 5) -> list[str]:
-        return await sqlite_fts.search(query, limit)
+    async def recall(self, query: str, limit: int = 5, kind: str | None = None) -> list[str]:
+        return await sqlite_fts.search(query, limit, kind)
