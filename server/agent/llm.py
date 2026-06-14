@@ -16,7 +16,7 @@ from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
-from agent.tools import TOOLS, execute_tool
+from agent.tools import BACKGROUND_TOOLS, TOOLS, execute_tool
 from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
 _client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
@@ -111,20 +111,6 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
         if finish_reason != "tool_calls" or not tc_acc or session is None:
             return
 
-        # 把助手的工具调用意图写入 working_messages（历史完整性）
-        working.append({
-            "role": "assistant",
-            "content": "".join(content_parts) or None,
-            "tool_calls": [
-                {
-                    "id": acc["id"],
-                    "type": "function",
-                    "function": {"name": acc["name"], "arguments": acc["arguments"]},
-                }
-                for acc in tc_acc.values()
-            ],
-        })
-
         # 先解析参数并通知前端"工具调用开始"（ReAct 可视化）。
         # 带 call_id（=tool_call_id）供前端精确关联 result；带 gen 供 barge-in 时清理。
         gen = getattr(session, "_reply_gen", 0)
@@ -143,8 +129,13 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
                 "gen": gen,
             })
 
-        # 并发执行所有工具（本轮可能有多个 tool_call），结果回来即推前端
-        async def _run(acc, args):
+        # co-emission 分流：承载类（结果决定答案）阻塞回填、续轮；
+        # 背景类（记忆写入）fire-and-forget，不喂回 LLM、不阻塞回答。
+        blocking = [(a, x) for a, x in parsed if a["name"] not in BACKGROUND_TOOLS]
+        background = [(a, x) for a, x in parsed if a["name"] in BACKGROUND_TOOLS]
+
+        # 执行一个工具并把结果推前端面板；返回结果字符串。
+        async def _run(acc, args) -> str:
             result = await execute_tool(acc["name"], args, session)
             await session._send_json({
                 "type": "tool_result",
@@ -153,10 +144,43 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
                 "content": result,
                 "gen": gen,
             })
-            return {"role": "tool", "tool_call_id": acc["id"], "content": result}
+            return result
 
-        tool_msgs = await asyncio.gather(*[_run(acc, args) for acc, args in parsed])
-        working.extend(tool_msgs)
+        # 背景工具：脱离回答链路 fire-and-forget。写入本身只是入队、瞬时返回；
+        # 用 session._fire 纳入发送 task 集，barge-in 不取消它，仅断连时统一清理。
+        for acc, args in background:
+            session._fire(_run(acc, args))
+
+        def _tc_msg(items: list[tuple[dict, dict]]) -> dict:
+            return {
+                "role": "assistant",
+                "content": "".join(content_parts) or None,
+                "tool_calls": [
+                    {
+                        "id": acc["id"],
+                        "type": "function",
+                        "function": {"name": acc["name"], "arguments": acc["arguments"]},
+                    }
+                    for acc, _ in items
+                ],
+            }
+
+        if not blocking:
+            # 只有背景工具：本轮已产出回答内容 → 回答完整，背景写入异步进行，结束。
+            if content_parts:
+                return
+            # 模型只调了背景工具、没开口：补合成结果让它续轮生成可念的回复。
+            # （真正的写入已由上面的 _fire 触发，这里仅满足工具调用协议。）
+            working.append(_tc_msg(background))
+            for acc, _ in background:
+                working.append({"role": "tool", "tool_call_id": acc["id"], "content": "已记录"})
+            continue
+
+        # 有承载类工具：仅其调用意图入 working（背景类已另路处理），回填结果后续轮。
+        working.append(_tc_msg(blocking))
+        results = await asyncio.gather(*[_run(acc, args) for acc, args in blocking])
+        for (acc, _), result in zip(blocking, results):
+            working.append({"role": "tool", "tool_call_id": acc["id"], "content": result})
 
     # 到达最大步数上限，强制最终回答（不带工具）
     tid = await session._trace_start("llm", "reply_final", LLM_MODEL) if session else None
