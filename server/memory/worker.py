@@ -17,6 +17,8 @@ from memory.provider import MemoryProvider, SqliteMemoryProvider
 log = logging.getLogger(__name__)
 
 
+# 队列任务三态：完成回合（走 LLM 抽取）、直接写事实、自愈更正。
+# 全部经同一单消费者串行处理，保写入顺序。
 @dataclass
 class _Turn:
     user_text: str
@@ -24,10 +26,23 @@ class _Turn:
     session_id: str
 
 
+@dataclass
+class _Fact:
+    content: str
+    session_id: str
+
+
+@dataclass
+class _Correction:
+    fact_id: int
+    right: str
+    session_id: str
+
+
 class MemoryWorker:
     def __init__(self, provider: MemoryProvider) -> None:
         self._provider = provider
-        self._queue: asyncio.Queue[_Turn] = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue()  # _Turn | _Fact | _Correction
         self._task: asyncio.Task | None = None
         self._stopping = False  # stop() 排空后置位，拒绝晚到的 enqueue（否则无人消费）
 
@@ -36,26 +51,56 @@ class MemoryWorker:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
+    async def recall(
+        self, query: str, limit: int = 5, kind: str | None = None
+    ) -> list[tuple[int, str]]:
+        """读侧入口：召回与 query 相关的 (id, content)，供回复前回灌。
+
+        只读、不经写队列，与后台串行写互不阻塞（底层 sqlite 访问由其自身锁串行化）。
+        """
+        return await self._provider.recall(query, limit, kind)
+
+    def _put(self, item, session_id: str) -> None:
+        """统一入队闸门：关停后拒绝并记录，否则非阻塞入队。"""
+        if self._stopping:
+            # 进程正在关停、队列已排空：此后到达的写入不再有消费者，记录后丢弃。
+            log.warning("memory worker stopping, dropped %s (session=%s)",
+                        type(item).__name__, session_id)
+            return
+        self._queue.put_nowait(item)
+
     def enqueue(self, user_text: str, assistant_text: str, session_id: str) -> None:
-        """非阻塞入队一个已完成回合。空回合（两端都空）直接丢弃。"""
+        """非阻塞入队一个已完成回合（走 LLM 抽取）。空回合（两端都空）直接丢弃。"""
         if not user_text and not assistant_text:
             return
-        if self._stopping:
-            # 进程正在关停、队列已排空：此后到达的回合不再有消费者，记录后丢弃。
-            log.warning("memory worker stopping, dropped turn (session=%s)", session_id)
+        self._put(_Turn(user_text, assistant_text, session_id), session_id)
+
+    def remember(self, content: str, session_id: str) -> None:
+        """非阻塞入队一条 agent 主动认定的长期事实（不经抽取）。"""
+        if not content.strip():
             return
-        self._queue.put_nowait(_Turn(user_text, assistant_text, session_id))
+        self._put(_Fact(content, session_id), session_id)
+
+    def correct(self, fact_id: int, right: str, session_id: str) -> None:
+        """非阻塞入队一次记忆自愈：按 id 删旧事实、写更正。"""
+        self._put(_Correction(fact_id, right, session_id), session_id)
 
     async def _run(self) -> None:
         while True:
-            turn = await self._queue.get()
+            item = await self._queue.get()
             try:
-                await self._provider.sync_turn(
-                    turn.user_text, turn.assistant_text, turn.session_id
-                )
+                if isinstance(item, _Fact):
+                    await self._provider.remember_fact(item.content, item.session_id)
+                elif isinstance(item, _Correction):
+                    await self._provider.correct_fact(item.fact_id, item.right, item.session_id)
+                else:  # _Turn
+                    await self._provider.sync_turn(
+                        item.user_text, item.assistant_text, item.session_id
+                    )
             except Exception as exc:
-                # 单条回合落库失败不能拖垮 worker，记录后继续下一条。
-                log.warning("memory sync_turn failed (session=%s): %s", turn.session_id, exc)
+                # 单条写入失败不能拖垮 worker，记录后继续下一条。
+                log.warning("memory write failed (%s, session=%s): %s",
+                            type(item).__name__, getattr(item, "session_id", "?"), exc)
             finally:
                 self._queue.task_done()
 

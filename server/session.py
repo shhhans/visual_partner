@@ -157,7 +157,17 @@ class Session:
         # 通知客户端新回复开始，客户端应冲掉上一轮残余音频
         await self._send_json({"type": "start", "gen": gen})
         try:
-            async for delta in stream_chat(self.history, session=self):
+            # 先快照本回合历史再 await 召回：召回期间 _on_scene_change 可能并发
+            # 往 history 追加观察，若 await 后再切片会把注入插错位置。
+            user_msg = self.history[-1]
+            prefix = self.history[:-1]
+            recalled = await self._recall_context()
+            if recalled is not None:
+                # 注入到本回合用户消息之前；用快照而非 live history，不写回 self.history
+                messages = prefix + [recalled, user_msg]
+            else:
+                messages = self.history
+            async for delta in stream_chat(messages, session=self):
                 if self._metrics is not None:
                     if self._metrics.t_ttft is None:
                         self._metrics.t_ttft = self._now()
@@ -184,6 +194,31 @@ class Session:
                 # 被打断的回合同样照实入长期记忆（视为正常 message）
                 self._remember("".join(spoken) + "（已被用户打断）")
             raise
+
+    async def _recall_context(self) -> dict | None:
+        """回复前用当前用户语句召回相关长期事实，返回待注入的 system 消息。
+
+        纯本地 FTS 查询（亚毫秒级），同步在回复前做，能帮到当前这句，
+        故不采用「只预热下一回合」。无命中或失败返回 None，绝不阻断回复。
+        """
+        if not self._current_user_text:
+            return None
+        try:
+            facts = await get_worker().recall(self._current_user_text, limit=5, kind="fact")
+        except Exception:
+            return None
+        if not facts:
+            return None
+        # 每条带 [#id] 编号：模型若发现某条已过时/有误，用该编号调 correct_memory 自愈。
+        bullets = "\n".join(f"- [#{fid}] {content}" for fid, content in facts)
+        return {
+            "role": "system",
+            "content": (
+                "下面是你记得的、可能和当前对话相关的用户信息（每条前的 [#数字] 是它的编号）。"
+                "自然地运用，不要生硬复述，也不要主动声称这是「记忆」；"
+                "若某条已过时或有误，用它的编号调 correct_memory 更正：\n" + bullets
+            ),
+        }
 
     def _remember(self, assistant_text: str) -> None:
         """把本回合（用户语句 + 助手回复）送进长期记忆 worker。

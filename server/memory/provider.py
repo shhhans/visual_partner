@@ -21,8 +21,18 @@ class MemoryProvider(ABC):
         """把一个已完成回合落入长期记忆（回合结束后由后台 worker 调用）。"""
 
     @abstractmethod
-    async def recall(self, query: str, limit: int = 5) -> list[str]:
-        """按相关度召回记忆（slice 2 接入回复链路做 prefetch 回灌）。"""
+    async def remember_fact(self, content: str, session_id: str) -> None:
+        """直接写入一条 agent 主动认定的长期事实（不经 LLM 抽取）。"""
+
+    @abstractmethod
+    async def correct_fact(self, fact_id: int, right: str, session_id: str) -> None:
+        """记忆自愈：按 id 删除过时/错误事实，写入更正后的事实（right 为空则仅删除）。"""
+
+    @abstractmethod
+    async def recall(
+        self, query: str, limit: int = 5, kind: str | None = None
+    ) -> list[tuple[int, str]]:
+        """按相关度召回 (id, content)，回复前注入 prompt。kind 限定类别。"""
 
 
 class SqliteMemoryProvider(MemoryProvider):
@@ -41,5 +51,16 @@ class SqliteMemoryProvider(MemoryProvider):
         for fact in facts:
             await sqlite_fts.add("fact", fact, session_id)
 
-    async def recall(self, query: str, limit: int = 5) -> list[str]:
-        return await sqlite_fts.search(query, limit)
+    async def remember_fact(self, content: str, session_id: str) -> None:
+        await sqlite_fts.add("fact", content, session_id)
+
+    async def correct_fact(self, fact_id: int, right: str, session_id: str) -> None:
+        # 按 id 删旧（agent 传回灌时给的 [#id] 编号），再写新。
+        await sqlite_fts.delete_by_id(fact_id)
+        if right.strip():
+            await sqlite_fts.add("fact", right, session_id)
+
+    async def recall(
+        self, query: str, limit: int = 5, kind: str | None = None
+    ) -> list[tuple[int, str]]:
+        return await sqlite_fts.search(query, limit, kind)
