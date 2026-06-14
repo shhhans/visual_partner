@@ -103,6 +103,10 @@ class FrameStore:
         prompt = (
             f"请用简短的中文描述画面内容，重点回答：{question}。"
             "只描述画面事实，不要推测，不要问候语。"
+            # 穿搭增强：仍只报事实（建议由 LLM 给），但把建议用得上的维度如实捕捉，
+            # 让下游 LLM 有据可依——颜色、单品款式、版型是否合身、场合是否得体。
+            "若问题涉及穿着搭配，请如实说明各件单品的颜色、款式，"
+            "以及版型是否合身、整体是否适合相应场合。"
         )
         result = await self._call_vl(frame_b64, prompt, session, "vision_passive")
         self._vl_cache[cache_key] = (result, time.monotonic())
