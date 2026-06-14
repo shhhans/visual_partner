@@ -52,6 +52,9 @@ class Session:
         # 主动视觉：场景变化触发的冷却与重入保护
         self._last_scene_ts: float = 0.0  # 上次主动视觉触发时刻（冷却用）
         self._scene_busy: bool = False    # 取帧+VL 处理中，防止并发场景触发重入
+        # 进行中的调用追踪：trace id → 起始 loop 时刻。barge-in 取消时统一兜底结束，
+        # 避免被中途取消的 LLM/VL 调用在前端面板留永久 pending 行。
+        self._open_traces: dict[str, float] = {}
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -283,6 +286,8 @@ class Session:
             except asyncio.CancelledError:
                 pass
         self._reply_task = None
+        # 被取消的 LLM/VL 调用来不及自报 end，统一兜底结束，清掉面板的 pending 行
+        await self._flush_open_traces()
         # 进行中回合被打断：如实落库（total_ms 留空，e2e/ttft 等已测部分仍有效）
         await self._flush_metrics(interrupted=True)
         if notify:
@@ -312,6 +317,7 @@ class Session:
         gen 携带当前代号，便于面板与对话流按轮次对齐。
         """
         tid = uuid.uuid4().hex[:8]
+        self._open_traces[tid] = self._now()
         await self._send_json({
             "type": "trace", "phase": "start", "id": tid,
             "kind": kind, "purpose": purpose, "model": model, "gen": self._reply_gen,
@@ -319,10 +325,27 @@ class Session:
         return tid
 
     async def _trace_end(self, tid: str, ms: float, summary: str = "", ok: bool = True) -> None:
+        self._open_traces.pop(tid, None)
         await self._send_json({
             "type": "trace", "phase": "end", "id": tid,
             "ms": round(ms), "summary": summary, "ok": ok,
         })
+
+    async def _flush_open_traces(self) -> None:
+        """兜底结束所有仍挂着的 trace（barge-in 取消的 LLM/VL 调用来不及自报 end）。
+
+        这些调用都跑在 _reply_task 内，取消必经 _cancel_reply，故在那里统一调用。
+        """
+        if not self._open_traces:
+            return
+        now = self._now()
+        pending = list(self._open_traces.items())
+        self._open_traces.clear()
+        for tid, t0 in pending:
+            await self._send_json({
+                "type": "trace", "phase": "end", "id": tid,
+                "ms": round((now - t0) * 1000), "summary": "已中断", "ok": False,
+            })
 
     # ---------- 发送（连接断开时静默吞掉，由 run() 统一收尾） ----------
 
