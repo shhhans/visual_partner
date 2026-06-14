@@ -19,6 +19,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from agent.llm import complete_chat, stream_chat
 from config import PROACTIVE_DIRECTIVE, SYSTEM_PROMPT
+from memory import get_worker
 from metrics import TurnMetrics, save_turn
 from vision.frame import FrameStore
 from voice.asr import AsrEvent, StreamingAsr
@@ -47,6 +48,8 @@ class Session:
         # 延迟指标采集（详见 metrics.py）
         self._session_id = uuid.uuid4().hex[:8]
         self._turn_index = 0
+        # 本回合的用户语句，回合结束时连同助手回复一起送进长期记忆
+        self._current_user_text = ""
         self._last_partial_ts: float | None = None  # 本句最后一次 ASR partial 时刻
         self._metrics: TurnMetrics | None = None  # 当前进行中回合的指标累加器
         # 主动视觉：场景变化触发的冷却与重入保护
@@ -61,6 +64,8 @@ class Session:
 
     async def run(self) -> None:
         self.asr.start()
+        # 惰性启动进程级记忆 worker（须在运行中的事件循环内，此处即 WS 处理协程）
+        get_worker().ensure_started()
         consumer = asyncio.create_task(self._consume_asr())
         try:
             while True:
@@ -125,6 +130,7 @@ class Session:
             self._last_partial_ts = now
             return
         self.history.append({"role": "user", "content": event.text})
+        self._current_user_text = event.text
         self._metrics = TurnMetrics(
             session_id=self._session_id,
             turn_index=self._turn_index,
@@ -162,7 +168,9 @@ class Session:
             await self._tts.finish()
             # finish() 返回后所有音频帧均已提交发送，清除 inflight 标志
             self._audio_inflight = False
-            self.history.append({"role": "assistant", "content": "".join(spoken)})
+            reply = "".join(spoken)
+            self.history.append({"role": "assistant", "content": reply})
+            self._remember(reply)
             if self._metrics is not None:
                 self._metrics.t_done = self._now()
                 await self._flush_metrics(interrupted=False)
@@ -173,7 +181,16 @@ class Session:
                 self.history.append(
                     {"role": "assistant", "content": "".join(spoken) + "（已被用户打断）"}
                 )
+                # 被打断的回合同样照实入长期记忆（视为正常 message）
+                self._remember("".join(spoken) + "（已被用户打断）")
             raise
+
+    def _remember(self, assistant_text: str) -> None:
+        """把本回合（用户语句 + 助手回复）送进长期记忆 worker。
+
+        enqueue 是非阻塞的，落库与事实抽取都在后台 worker 串行进行，不占回复热路径。
+        """
+        get_worker().enqueue(self._current_user_text, assistant_text, self._session_id)
 
     # ---------- 主动视觉（场景变化 → 取帧 VL → 观察入史 →（空闲则主动发声）） ----------
 
@@ -214,7 +231,11 @@ class Session:
             self._scene_busy = False
 
     async def _proactive_reply(self) -> None:
-        """空闲态下的主动发声：先非流式决策是否值得开口（SKIP=沉默），值得才播报。"""
+        """空闲态下的主动发声：先非流式决策是否值得开口（SKIP=沉默），值得才播报。
+
+        注意：主动回合不调 _remember()——它没有对应的用户语句，若与过期的
+        _current_user_text 配对会污染记忆。slice 1 有意不入记忆，留待后续按需处理。
+        """
         try:
             directive = {"role": "system", "content": PROACTIVE_DIRECTIVE}
             text = (await complete_chat(
