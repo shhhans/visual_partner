@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from 'react';
 import { Speaker, startMic, type MicHandle } from '../lib/audio';
-import { captureFrame, startCamera } from '../lib/camera';
+import { captureFrame, grabScenePixels, pixelDiff, startCamera } from '../lib/camera';
 import { WS_URL } from '../lib/config';
 import workletUrl from '../lib/pcm-worklet.js?url';
 
@@ -15,6 +15,17 @@ export type VPStatus = 'connecting' | 'idle' | 'listening' | 'looking' | 'speaki
 const VAD_THRESHOLD = 0.04;
 const SPEECH_START_MS = 120;
 const SPEECH_END_MS = 700;
+
+// 主动视觉前端流水线常量（与 clients/web/main.js 对齐，设计见 docs/vision-pipeline.md）：
+//   帧差(SAD) → EMA 平滑 → hysteresis 运动门 → 静止确认 → 关键帧对比。
+// 全在本地完成，不调云；只有判定「画面真的变了」才上行 scene_change，
+// 由后端再做冷却/空闲判定（见 server/session.py）。产品形态不渲染调试仪表。
+const SCENE_SAMPLE_MS = 350; // ~3fps，人搬动/进出是秒级事件，足够捕捉
+const EMA_ALPHA = 0.4; // 帧差平滑：新帧权重，越小越平滑（压制低头等单帧尖峰）
+const MOTION_ENTER = 8; // hysteresis 进：ema 超过 → 运动中
+const MOTION_EXIT = 4; // hysteresis 出：ema 低于并连续保持 → 视为静止
+const SETTLE_FRAMES = 4; // 连续静止帧数达标 → 确认进入新稳态（≈1.4s）
+const KEYFRAME_THRESHOLD = 25; // 终态帧 vs 上一稳态帧差异 ≥ 此值 → 画面真变了
 
 export type VisualPartner = {
   status: VPStatus;
@@ -44,6 +55,7 @@ export function useVisualPartner(videoRef: RefObject<HTMLVideoElement | null>): 
     let mic: MicHandle | null = null;
     let raf: number | null = null;
     let camStream: MediaStream | null = null;
+    let sceneTimer: ReturnType<typeof setInterval> | null = null;
 
     // ---------- 本地 VAD 状态（仅本 effect 内） ----------
     // vadSpeaking 由 Silero 回调驱动；下面三个仅 RMS 兜底路径使用。
@@ -57,6 +69,13 @@ export function useVisualPartner(videoRef: RefObject<HTMLVideoElement | null>): 
     // 记录 call_id 以便只对发起视觉的那次工具调用做匹配退出。
     let lookingActive = false;
     let lookingCallId: string | null = null;
+
+    // ---------- 主动视觉流水线状态（仅本 effect 内） ----------
+    let emaDiff = 0; // 帧差的 EMA 平滑值
+    let prevFrame: Uint8Array | null = null; // 上一帧灰度缓冲，算帧间差
+    let stableFrame: Uint8Array | null = null; // 上一个稳态终态帧，关键帧对比基准
+    let sceneState: 'idle' | 'moving' = 'idle';
+    let settleCount = 0; // 连续静止帧计数
 
     // ---------- 服务端事件分发（协议见 docs/voice-pipeline.md） ----------
     const onMessage = (event: MessageEvent) => {
@@ -159,7 +178,55 @@ export function useVisualPartner(videoRef: RefObject<HTMLVideoElement | null>): 
       raf = requestAnimationFrame(tick);
     };
 
+    // ---------- 主动视觉：低频采样画面变化（不调云，判定真变化才上行）----------
+    const sceneTick = () => {
+      const video = videoRef.current;
+      if (!video) return;
+      const cur = grabScenePixels(video);
+      if (!cur) return;
+      if (prevFrame) {
+        const inst = pixelDiff(cur, prevFrame);
+        emaDiff = EMA_ALPHA * inst + (1 - EMA_ALPHA) * emaDiff;
+      }
+      prevFrame = cur;
+
+      if (sceneState === 'idle') {
+        // 运动门：平滑帧差越过进入阈值 → 进入运动观察态
+        if (emaDiff > MOTION_ENTER) {
+          sceneState = 'moving';
+          settleCount = 0;
+        }
+      } else {
+        // 运动中：连续若干帧低于退出阈值 → 画面已静止，进入关键帧确认
+        if (emaDiff < MOTION_EXIT) {
+          if (++settleCount >= SETTLE_FRAMES) {
+            const keyDelta = stableFrame ? pixelDiff(cur, stableFrame) : 0;
+            // 画面真的变了 → 上行通知后端取帧 VL（后端再做冷却/空闲判定）
+            if (keyDelta >= KEYFRAME_THRESHOLD && ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'scene_change', score: Math.round(keyDelta) }));
+            }
+            stableFrame = cur; // 更新稳态基准（无论是否判定为变化）
+            sceneState = 'idle';
+            settleCount = 0;
+          }
+        } else {
+          settleCount = 0; // 又动了，重置静止计数（hysteresis 防抖）
+        }
+      }
+    };
+
+    const startSceneWatch = () => {
+      // 重置流水线状态，并以首帧为初始稳态基准，避免开场误判为「画面变了」
+      emaDiff = 0;
+      sceneState = 'idle';
+      settleCount = 0;
+      prevFrame = videoRef.current ? grabScenePixels(videoRef.current) : null;
+      stableFrame = prevFrame;
+      sceneTimer = setInterval(sceneTick, SCENE_SAMPLE_MS);
+    };
+
     const cleanup = () => {
+      if (sceneTimer !== null) clearInterval(sceneTimer);
       if (raf !== null) cancelAnimationFrame(raf);
       mic?.stop();
       speaker?.close();
@@ -215,6 +282,7 @@ export function useVisualPartner(videoRef: RefObject<HTMLVideoElement | null>): 
         }
         setErrorMsg(null);
         setStatusSafe('idle');
+        startSceneWatch(); // 主动视觉：开始低频采样画面变化
         raf = requestAnimationFrame(tick);
       } catch (e) {
         if (!cancelled) {
