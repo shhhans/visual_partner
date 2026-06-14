@@ -209,12 +209,14 @@ class Session:
             return None
         if not facts:
             return None
-        bullets = "\n".join(f"- {f}" for f in facts)
+        # 每条带 [#id] 编号：模型若发现某条已过时/有误，用该编号调 correct_memory 自愈。
+        bullets = "\n".join(f"- [#{fid}] {content}" for fid, content in facts)
         return {
             "role": "system",
             "content": (
-                "下面是你记得的、可能和当前对话相关的用户信息。"
-                "自然地运用，不要生硬复述，也不要主动声称这是「记忆」：\n" + bullets
+                "下面是你记得的、可能和当前对话相关的用户信息（每条前的 [#数字] 是它的编号）。"
+                "自然地运用，不要生硬复述，也不要主动声称这是「记忆」；"
+                "若某条已过时或有误，用它的编号调 correct_memory 更正：\n" + bullets
             ),
         }
 

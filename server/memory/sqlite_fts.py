@@ -79,13 +79,30 @@ def _build_match(text: str) -> str:
     return " OR ".join('"' + g.replace('"', '""') + '"' for g in grams)
 
 
-def _query(text: str, limit: int, kind: str | None) -> list[str]:
+def _delete_by_id(rowid: int) -> int:
+    """按 rowid 删除 fact 行，返回删除条数（记忆自愈用）。
+
+    限定 kind='fact'：correct_memory 只允许删 fact，绝不误删原始对话 episode。
+    """
+    init_db()
+    assert _conn is not None
+    with _lock:
+        cur = _conn.execute(
+            "DELETE FROM memory WHERE rowid = ? AND kind = 'fact'", (rowid,)
+        )
+        _conn.commit()
+        return cur.rowcount
+
+
+def _query(text: str, limit: int, kind: str | None) -> list[tuple[int, str]]:
     init_db()
     assert _conn is not None
     match = _build_match(text)
     if not match:
         return []
-    sql = "SELECT content FROM memory WHERE memory MATCH ?"
+    # 取 rowid 作为对模型公开的稳定记忆编号，供 correct_memory 按 id 精确删除，
+    # 免去让模型逐字复述事实原文（改写措辞就删不掉）的脆弱性。
+    sql = "SELECT rowid, content FROM memory WHERE memory MATCH ?"
     params: list = [match]
     if kind is not None:
         # kind 是 UNINDEXED 列，可在 WHERE 里与 MATCH 并用做过滤。
@@ -95,7 +112,7 @@ def _query(text: str, limit: int, kind: str | None) -> list[str]:
     params.append(limit)
     with _lock:
         cur = _conn.execute(sql, params)
-        return [row[0] for row in cur.fetchall()]
+        return [(row[0], row[1]) for row in cur.fetchall()]
 
 
 async def add(kind: str, content: str, session_id: str) -> None:
@@ -103,8 +120,15 @@ async def add(kind: str, content: str, session_id: str) -> None:
     await asyncio.to_thread(_insert, kind, content, session_id)
 
 
-async def search(text: str, limit: int = 5, kind: str | None = None) -> list[str]:
-    """按全文相关度召回记忆内容。kind 非空时只召回该类（'fact' / 'episode'）。"""
+async def delete_by_id(rowid: int) -> int:
+    """按 rowid 删除 fact 行，返回删除条数。"""
+    return await asyncio.to_thread(_delete_by_id, rowid)
+
+
+async def search(
+    text: str, limit: int = 5, kind: str | None = None
+) -> list[tuple[int, str]]:
+    """按全文相关度召回 (rowid, content)。kind 非空时只召回该类（'fact' / 'episode'）。"""
     if not text.strip():
         return []
     return await asyncio.to_thread(_query, text, limit, kind)
