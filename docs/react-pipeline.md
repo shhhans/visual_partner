@@ -1,6 +1,6 @@
 # ReAct 链路
 
-> 状态：**骨架已留，LLM 流式直连已通（无工具版），工具循环待实现**
+> 状态：**多轮 ReAct 工具循环已实现**（流式 + 工具调用）。
 
 ## 定位
 
@@ -28,13 +28,19 @@
 
 | 职责 | 文件 |
 |---|---|
-| LLM 流式调用封装 | `server/agent/llm.py` |
-| 工具 schema 与执行 | `server/agent/tools.py`（骨架） |
+| LLM 流式调用封装 + 多轮工具循环 | `server/agent/llm.py`（`stream_chat`） |
+| 非流式决策调用（主动视觉 SKIP 判断） | `server/agent/llm.py`（`complete_chat`） |
+| 工具 schema 与执行 | `server/agent/tools.py`（`TOOLS` / `execute_tool`） |
 | 对话历史/轮次编排 | `server/session.py` |
+
+## 已实现
+
+- [x] 工具循环：解析流式 tool_calls 增量、并发执行、结果回填、二次调用（上限 `MAX_REACT_STEPS`=5）
+- [x] 打断后的历史处理：被打断的回复以"(已被用户打断)"截断入史，保持上下文真实
+- [x] 四个内置工具：datetime / calculate / weather / web_search；视觉为 look_at_camera（见 vision-pipeline.md）
 
 ## TODO
 
-- [ ] 工具循环：解析流式 tool_calls 增量、执行、二次调用
-- [ ] 历史窗口裁剪 + 旧轮次摘要（可选）
+- [ ] 历史窗口裁剪 + 旧轮次摘要：现为纯滚动窗口；拟升级为 **Summary Buffer**（最近 N 轮原文 + 溢出轮增量摘要并入 running summary）。
+      这是一个全局短期记忆层，主回复与主动视觉 VL 可共用同一份摘要，成本被主消费者摊薄。
 - [ ] MiniMax 备选通道（abab / MiniMax-Text），配置切换
-- [ ] 打断后的历史处理：被打断的回复以"(已被用户打断)"截断入史，保持上下文真实

@@ -11,16 +11,43 @@
 
 import asyncio
 import json
+import time
 from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
 from agent.tools import TOOLS, execute_tool
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, LLM_MODEL
+from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
-_client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+_client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
 MAX_REACT_STEPS = 5
+
+
+async def complete_chat(
+    messages: list[dict], session=None, purpose: str = "complete"
+) -> str:
+    """非流式获取完整回复，不带工具。
+
+    用于主动视觉「是否值得主动开口」的决策：需要拿到完整文本才能判断 SKIP，
+    且主动发言对首字延迟不敏感，故不走流式、不挂工具。
+    """
+    tid = await session._trace_start("llm", purpose, LLM_MODEL) if session else None
+    t0 = time.monotonic()
+    try:
+        resp = await _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            stream=False,
+        )
+    except Exception:
+        if tid:
+            await session._trace_end(tid, (time.monotonic() - t0) * 1000, "调用失败", ok=False)
+        raise
+    text = resp.choices[0].message.content or ""
+    if tid:
+        await session._trace_end(tid, (time.monotonic() - t0) * 1000, text[:40] or "(空)")
+    return text
 
 
 async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
@@ -28,6 +55,8 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
     working = list(messages)
 
     for _step in range(MAX_REACT_STEPS):
+        tid = await session._trace_start("llm", "reply", LLM_MODEL) if session else None
+        t0 = time.monotonic()
         stream = await _client.chat.completions.create(
             model=LLM_MODEL,
             messages=working,
@@ -67,6 +96,16 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
                             acc["name"] += tc.function.name
                         if tc.function.arguments:
                             acc["arguments"] += tc.function.arguments
+
+        # 本轮 LLM 调用结束：推 trace（文本则摘要，工具则标注调用了哪些工具）
+        if tid:
+            if content_parts:
+                summary = "".join(content_parts)[:40]
+            elif tc_acc:
+                summary = "调用工具 " + ",".join(a["name"] for a in tc_acc.values())
+            else:
+                summary = ""
+            await session._trace_end(tid, (time.monotonic() - t0) * 1000, summary)
 
         # 无工具调用 → 本次回复已完整输出，结束
         if finish_reason != "tool_calls" or not tc_acc or session is None:
@@ -120,6 +159,9 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
         working.extend(tool_msgs)
 
     # 到达最大步数上限，强制最终回答（不带工具）
+    tid = await session._trace_start("llm", "reply_final", LLM_MODEL) if session else None
+    t0 = time.monotonic()
+    final_parts: list[str] = []
     stream = await _client.chat.completions.create(
         model=LLM_MODEL,
         messages=working,
@@ -127,4 +169,7 @@ async def stream_chat(messages: list[dict], session=None) -> AsyncIterator[str]:
     )
     async for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
+            final_parts.append(chunk.choices[0].delta.content)
             yield chunk.choices[0].delta.content
+    if tid:
+        await session._trace_end(tid, (time.monotonic() - t0) * 1000, "".join(final_parts)[:40])

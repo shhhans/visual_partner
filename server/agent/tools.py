@@ -106,7 +106,7 @@ async def execute_tool(name: str, arguments: dict, session) -> str:
         frame_b64 = await session.frames.request_frame(session.ws, session._ws_lock)
         if frame_b64 is None:
             return "摄像头画面暂时不可用，请确认摄像头已开启。"
-        return await session.frames.describe(frame_b64, question)
+        return await session.frames.describe(frame_b64, question, session=session)
 
     if name == "get_datetime":
         return get_datetime()

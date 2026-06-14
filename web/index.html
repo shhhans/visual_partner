@@ -11,9 +11,28 @@
     <section class="video-pane">
       <video id="camera" autoplay playsinline muted></video>
       <div id="status" class="status">点击「开始对话」授权摄像头与麦克风</div>
+      <!-- 主动视觉调试仪表：流水线各层状态（运动门 + 关键帧确认），调阈值用 -->
+      <div id="scene-meter" class="scene-meter">
+        <div class="scene-meter-row">
+          <span class="scene-meter-label">画面变化</span>
+          <span id="scene-state" class="scene-state idle">稳定</span>
+          <span id="scene-val" class="scene-meter-val">—</span>
+        </div>
+        <div class="scene-bar">
+          <div id="scene-bar-fill" class="scene-bar-fill"></div>
+          <div id="scene-bar-threshold" class="scene-bar-threshold"></div>
+        </div>
+        <div class="scene-meter-row scene-meter-sub">
+          <span>上次关键帧Δ</span>
+          <span id="scene-keydelta">—</span>
+        </div>
+      </div>
     </section>
     <section class="chat-pane">
       <div id="transcript" class="transcript"></div>
+      <!-- 调用追踪：所有 LLM/VL 调用按发生顺序列出，#gen 与对话流轮次对齐 -->
+      <div class="trace-title">LLM / VL 调用追踪</div>
+      <div id="trace" class="trace"></div>
       <div id="metrics" class="metrics"></div>
       <button id="start-btn">开始对话</button>
     </section>

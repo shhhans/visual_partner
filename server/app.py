@@ -5,14 +5,18 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 
-from config import DASHSCOPE_API_KEY
+from config import DASHSCOPE_API_KEY, LLM_API_KEY
 from metrics import init_db
 from session import Session
 
 app = FastAPI(title="Visual Partner")
 
+# LLM/VL 走 OpenAI 兼容供应商，必须有 key（默认回落 DASHSCOPE_API_KEY）
+if not LLM_API_KEY:
+    raise RuntimeError("请在 .env 配置 OPENAI_API_KEY（或 LLM_API_KEY）")
+# ASR/TTS 走 DashScope 原生 SDK，单独需要 DASHSCOPE_API_KEY
 if not DASHSCOPE_API_KEY:
-    raise RuntimeError("请设置环境变量 DASHSCOPE_API_KEY")
+    raise RuntimeError("ASR/TTS 走 DashScope，请在 .env 配置 DASHSCOPE_API_KEY")
 
 # 延迟指标库：进程启动即建表（详见 metrics.py）
 init_db()

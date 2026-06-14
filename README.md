@@ -23,11 +23,24 @@
 ```bash
 cd server
 pip install -r requirements.txt
-set DASHSCOPE_API_KEY=sk-xxx   # PowerShell: $env:DASHSCOPE_API_KEY="sk-xxx"
+cp .env.example .env   # 然后填入 API key
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 浏览器打开 http://localhost:8000 ，授权摄像头与麦克风后即可对话。
+
+## 配置供应商（.env）
+
+LLM 与 VL 走 **OpenAI 兼容接口**，供应商在 `server/.env` 里配置，可整体切换或对 LLM/VL 分别覆盖；ASR/TTS 仍走 DashScope 原生 SDK。
+
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | LLM+VL 默认供应商；key 留空则回落 `DASHSCOPE_API_KEY` | DashScope 兼容端点 |
+| `LLM_MODEL` / `VL_MODEL` | 模型名 | `qwen-plus` / `qwen-vl-max` |
+| `LLM_BASE_URL/API_KEY`、`VL_BASE_URL/API_KEY` | 可选，把 LLM 或 VL 单独切到别的供应商 | 继承 `OPENAI_*` |
+| `DASHSCOPE_API_KEY` | ASR/TTS 必填（MiniMax 无 ASR） | — |
+
+例：把 LLM+VL 切到 MiniMax（`.env` 中设 `OPENAI_BASE_URL=https://api.minimax.io/v1`、`OPENAI_API_KEY=...`、`LLM_MODEL=VL_MODEL=MiniMax-M3`），ASR/TTS 继续用 DashScope。完整示例见 `server/.env.example`。
 
 ## 目录结构
 

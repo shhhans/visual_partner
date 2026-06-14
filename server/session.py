@@ -17,12 +17,15 @@ import uuid
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent.llm import stream_chat
-from config import SYSTEM_PROMPT
+from agent.llm import complete_chat, stream_chat
+from config import PROACTIVE_DIRECTIVE, SYSTEM_PROMPT
 from metrics import TurnMetrics, save_turn
 from vision.frame import FrameStore
 from voice.asr import AsrEvent, StreamingAsr
 from voice.tts import StreamingTts
+
+# 主动视觉：两次场景触发之间的冷却，防 diff 抖动刷屏 + 控 VL 成本
+_SCENE_COOLDOWN = 8.0
 
 
 class Session:
@@ -46,6 +49,9 @@ class Session:
         self._turn_index = 0
         self._last_partial_ts: float | None = None  # 本句最后一次 ASR partial 时刻
         self._metrics: TurnMetrics | None = None  # 当前进行中回合的指标累加器
+        # 主动视觉：场景变化触发的冷却与重入保护
+        self._last_scene_ts: float = 0.0  # 上次主动视觉触发时刻（冷却用）
+        self._scene_busy: bool = False    # 取帧+VL 处理中，防止并发场景触发重入
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -86,6 +92,11 @@ class Session:
         if data.get("type") == "frame":
             # 视觉链路：前端回传的抓帧，resolve 等待中的 future 并更新缓存
             self.frames.receive_frame(data.get("id", ""), data.get("data", ""))
+        elif data.get("type") == "scene_change":
+            # 主动视觉：前端检测到画面剧变。fire-and-forget 异步处理，
+            # 绝不阻塞 run() 接收循环——取帧依赖循环继续转动才能收到 frame 回传。
+            if not self._scene_busy:
+                self._fire(self._on_scene_change())
 
     # ---------- ASR 事件 ----------
 
@@ -161,6 +172,81 @@ class Session:
                 )
             raise
 
+    # ---------- 主动视觉（场景变化 → 取帧 VL → 观察入史 →（空闲则主动发声）） ----------
+
+    def _is_idle(self) -> bool:
+        """是否处于可主动发声的空闲态：无回复在跑、无在途音频、用户没在说话。"""
+        reply_running = self._reply_task is not None and not self._reply_task.done()
+        user_speaking = self._last_partial_ts is not None  # 有未结句的 partial = 正在说
+        return not reply_running and not self._audio_inflight and not user_speaking
+
+    async def _on_scene_change(self) -> None:
+        """前端上报画面剧变：取帧→VL→观察入史；空闲时再发起主动回合。
+
+        观察无论如何都入史，这样即便当下忙碌，用户下一句正常对话时 LLM 也能
+        自然带出「刚刚……」——主动视觉的记忆全靠这条入史的观察。
+        """
+        self._scene_busy = True
+        try:
+            now = self._now()
+            if now - self._last_scene_ts < _SCENE_COOLDOWN:
+                return  # 冷却期内，忽略（前端已防抖，这里再保一层并控成本）
+            self._last_scene_ts = now
+
+            frame_b64 = await self.frames.request_frame(self.ws, self._ws_lock)
+            if frame_b64 is None:
+                return  # 抓不到帧（摄像头关闭/超时），放弃本次
+            description = await self.frames.describe_scene(frame_b64, session=self)
+            # 观察入史：标注为系统检测，区别于用户语音
+            self.history.append(
+                {"role": "user", "content": f"[系统检测到画面变化] {description}"}
+            )
+
+            # 忙碌态：不抢麦，观察已入史，留待下一个自然回合消化
+            if not self._is_idle():
+                return
+            # 空闲态：发起主动回合，纳入 _reply_task 生命周期以便用户随时 barge-in
+            self._reply_task = asyncio.create_task(self._proactive_reply())
+        finally:
+            self._scene_busy = False
+
+    async def _proactive_reply(self) -> None:
+        """空闲态下的主动发声：先非流式决策是否值得开口（SKIP=沉默），值得才播报。"""
+        try:
+            directive = {"role": "system", "content": PROACTIVE_DIRECTIVE}
+            text = (await complete_chat(
+                self.history + [directive], session=self, purpose="proactive_decision"
+            )).strip()
+        except asyncio.CancelledError:
+            raise  # 决策阶段被 barge-in：直接取消，无副作用
+        except Exception:
+            return  # 决策失败：静默放弃，不打扰用户
+        if not text or text.upper().startswith("SKIP"):
+            return  # 不值得说，保持沉默（观察已入史）
+
+        # 决定开口：占用新代号，走 TTS，全程复用既有 barge-in 闸门
+        self._reply_gen += 1
+        gen = self._reply_gen
+        self._audio_inflight = False
+        self._tts = StreamingTts(
+            on_audio=lambda pcm: self._on_tts_audio(gen, pcm),
+            on_error=lambda msg: self._on_tts_error(gen, msg),
+        )
+        await self._send_json({"type": "start", "gen": gen})
+        try:
+            await self._send_json({"type": "delta", "text": text})
+            self._tts.feed(text)
+            await self._tts.finish()
+            self._audio_inflight = False
+            self.history.append({"role": "assistant", "content": text})
+            await self._send_json({"type": "done"})
+        except asyncio.CancelledError:
+            # 主动发言被用户打断：已说部分如实入史，保持上下文真实
+            self.history.append(
+                {"role": "assistant", "content": text + "（已被用户打断）"}
+            )
+            raise
+
     def _on_tts_audio(self, gen: int, pcm: bytes) -> None:
         # 由 call_soon_threadsafe 调度，运行在事件循环中，可安全访问实例状态
         if gen != self._reply_gen:
@@ -216,6 +302,27 @@ class Session:
             await save_turn(row)
         except Exception:
             pass  # 落库失败不应影响对话主流程
+
+    # ---------- 调用追踪（所有 LLM/VL 调用都推前端调试面板） ----------
+
+    async def _trace_start(self, kind: str, purpose: str, model: str) -> str:
+        """发一次调用的 start 事件，返回配对用 id。kind: 'llm'|'vl'。
+
+        await 发送（而非 fire），确保 start 一定先于对应 end 到达前端。
+        gen 携带当前代号，便于面板与对话流按轮次对齐。
+        """
+        tid = uuid.uuid4().hex[:8]
+        await self._send_json({
+            "type": "trace", "phase": "start", "id": tid,
+            "kind": kind, "purpose": purpose, "model": model, "gen": self._reply_gen,
+        })
+        return tid
+
+    async def _trace_end(self, tid: str, ms: float, summary: str = "", ok: bool = True) -> None:
+        await self._send_json({
+            "type": "trace", "phase": "end", "id": tid,
+            "ms": round(ms), "summary": summary, "ok": ok,
+        })
 
     # ---------- 发送（连接断开时静默吞掉，由 run() 统一收尾） ----------
 
