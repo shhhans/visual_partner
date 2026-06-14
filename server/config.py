@@ -38,11 +38,13 @@ VL_MODEL = os.environ.get("VL_MODEL", "qwen-vl-max")
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 
 ASR_MODEL = os.environ.get("ASR_MODEL", "paraformer-realtime-v2")
-ASR_SAMPLE_RATE = 16000  # 与 web/pcm-worklet.js 的输出采样率是数据契约，两边必须一致
+ASR_SAMPLE_RATE = 16000  # 与前端 PCM worklet 输出采样率是数据契约，两端前端必须一致
+# （clients/web/pcm-worklet.js、clients/capsule/src/lib/pcm-worklet.js）
 
 TTS_MODEL = os.environ.get("TTS_MODEL", "cosyvoice-v2")
 TTS_VOICE = os.environ.get("TTS_VOICE", "longxiaochun_v2")
-TTS_SAMPLE_RATE = 22050  # 与 web/audio.js 播放上下文采样率是数据契约
+TTS_SAMPLE_RATE = 22050  # 与前端播放上下文采样率是数据契约
+# （clients/web/audio.js、clients/capsule/src/lib/audio.ts）
 
 # ---------- 其他 ----------
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")  # 可选；未配置时 web_search 降级 DuckDuckGo

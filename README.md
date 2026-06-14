@@ -4,16 +4,19 @@
 
 ## 架构总览
 
+本项目采用**双线前端**：`clients/web` 是调试界面（后端直接托管的原生 JS 页面，便于联调与延迟观测），`clients/capsule` 是产品形态前端（Electron + React 桌面胶囊）。两者共用同一套 `server/` 后端与 `/ws` 协议。
+
 ```
-浏览器 (web/)                          后端 (server/)                DashScope / MiniMax
-┌──────────────┐   WS 二进制 PCM16    ┌────────────────┐
-│ 麦克风采集    │ ──────────────────→ │ 语音链路        │ → paraformer-realtime-v2 (ASR)
-│ 摄像头抓帧    │   WS JSON(帧/事件)  │ ReAct 链路      │ → qwen-plus (LLM, 流式)
-│ 音频播放队列  │ ←────────────────── │ 视觉链路        │ → qwen-vl-max (按需看图)
-└──────────────┘   WS 二进制 TTS音频  └────────────────┘ → cosyvoice-v2 (TTS, 流式)
+clients/web      ─┐                     后端 (server/)                DashScope / MiniMax
+ 调试界面         │   WS 二进制 PCM16   ┌────────────────┐
+clients/capsule  ─┤ ──────────────────→ │ 语音链路        │ → paraformer-realtime-v2 (ASR)
+ 产品形态(桌面胶囊)│   WS JSON(帧/事件)  │ ReAct 链路      │ → qwen-plus (LLM, 流式)
+                  │ ←────────────────── │ 视觉链路        │ → qwen-vl-max (按需看图)
+                 ─┘   WS 二进制 TTS音频  └────────────────┘ → cosyvoice-v2 (TTS, 流式)
 ```
 
 - 语音链路：`docs/voice-pipeline.md`
+- 语音链路复盘（对照 deep-research，待办缺口 + 延迟埋点说明）：`docs/voice-pipeline-review.md`
 - 视觉链路：`docs/vision-pipeline.md`
 - ReAct 链路：`docs/react-pipeline.md`
 - 设计文档（用户故事 / 成本控制）：`docs/design-doc.md`
@@ -27,7 +30,28 @@ cp .env.example .env   # 然后填入 API key
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-浏览器打开 http://localhost:8000 ，授权摄像头与麦克风后即可对话。
+浏览器打开 http://localhost:8000 （必须用 `localhost`，getUserMedia 要求安全上下文），授权摄像头与麦克风后即可对话——这是 `clients/web` 调试界面。
+
+产品形态前端（桌面胶囊）单独运行：
+
+```bash
+cd clients/capsule
+npm install
+npm run dev      # 启动 Vite + Electron，连接同一个 :8000 后端
+```
+
+## 延迟观测
+
+每个回合的延迟会落库并实时显示，方便对照 `docs/voice-pipeline-review.md` 里的延迟预算调参：
+
+- **前端面板**：聊天区下方一行显示本回合 `turn_closure / ttft / tts_first / e2e_first_audio / total`（回合结束后出现）。
+- **落库**：`server/metrics.db`（SQLite，进程启动自建，已 gitignore）。一回合一行，被打断的回合也记录。
+
+```bash
+sqlite3 server/metrics.db "select turn_index, turn_closure_ms, ttft_ms, e2e_first_audio_ms, total_ms, interrupted from turns order by id desc limit 10;"
+```
+
+> 注：尚未采集 token / 计费用量，面板「字数」为回复字符数而非 token。
 
 ## 配置供应商（.env）
 
@@ -49,12 +73,17 @@ server/
   app.py            FastAPI 入口，托管静态页 + /ws WebSocket
   config.py         模型名、采样率等集中配置
   session.py        每连接的会话编排（语音/视觉/ReAct 的粘合层）
+  metrics.py        每回合延迟指标采集 + SQLite 落库（metrics.db）
   voice/asr.py      流式 ASR 封装（DashScope SDK 回调 → asyncio 队列）
   voice/tts.py      流式 TTS 封装（CosyVoice）
   agent/llm.py      LLM 流式调用（OpenAI 兼容接口）
   agent/tools.py    ReAct 工具定义（look_at_camera 等）
   vision/frame.py   帧缓存与 VL 调用
-web/
-  index.html / main.js / audio.js / camera.js / style.css
-  pcm-worklet.js    麦克风 AudioWorklet（Float32 → Int16 PCM）
+clients/
+  web/              调试界面（后端托管的原生 JS 单页）
+    index.html / main.js / audio.js / camera.js / style.css
+    pcm-worklet.js  麦克风 AudioWorklet（Float32 → Int16 PCM）
+  capsule/          产品形态前端（Electron + React 桌面胶囊）
+    electron/       主进程 / preload
+    src/            React UI（Capsule 组件、useVisualPartner 链路 hook）
 ```

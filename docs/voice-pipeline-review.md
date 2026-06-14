@@ -65,7 +65,7 @@
   回合完成或被打断时 `_flush_metrics()` 折算成毫秒。
 - **落库**：`server/metrics.py`，stdlib `sqlite3`，库文件 `server/metrics.db`（零新依赖）。
   表 `turns` 一回合一行；被打断的回合也落，`interrupted=1`、`total_ms` 留空。
-- **前端**：`{type:"metrics", ...}` 推到页面右下角调试面板（`web/main.js` `renderMetrics`），
+- **前端**：`{type:"metrics", ...}` 推到页面右下角调试面板（`clients/web/main.js` `renderMetrics`），
   最新在上、保留 8 行，中断回合标黄。
 
 指标字段（对照 deep-research 延迟预算表）：
