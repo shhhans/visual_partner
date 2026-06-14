@@ -12,7 +12,7 @@ import uuid
 
 from openai import AsyncOpenAI
 
-from config import VL_API_KEY, VL_BASE_URL, VL_MODEL
+from config import SCENE_VL_PROMPT, VL_API_KEY, VL_BASE_URL, VL_MODEL
 
 _vl_client = AsyncOpenAI(api_key=VL_API_KEY, base_url=VL_BASE_URL)
 
@@ -57,36 +57,60 @@ class FrameStore:
             self._pending.pop(request_id, None)
             return self.latest_b64  # 超时降级
 
-    async def describe(self, frame_b64: str, question: str) -> str:
-        """调 qwen-vl-max，结合用户问题做定向描述。同帧短期内复用缓存结果。"""
+    async def _call_vl(
+        self, frame_b64: str, prompt: str, session=None, purpose: str = "vision"
+    ) -> str:
+        """单次 VL 调用：一帧图 + 一段文字 prompt，返回描述文本。
+
+        传入 session 时，调用前后推 trace 事件到调试面板（成本/行为可视化）。
+        """
+        tid = await session._trace_start("vl", purpose, VL_MODEL) if session else None
+        t0 = time.monotonic()
+        try:
+            response = await _vl_client.chat.completions.create(
+                model=VL_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+            )
+        except Exception:
+            if tid:
+                await session._trace_end(tid, (time.monotonic() - t0) * 1000, "调用失败", ok=False)
+            raise
+        result = response.choices[0].message.content or "无法理解画面"
+        if tid:
+            await session._trace_end(tid, (time.monotonic() - t0) * 1000, result[:40])
+        return result
+
+    async def describe(self, frame_b64: str, question: str, session=None) -> str:
+        """被动视觉：结合用户问题做定向描述。同帧短期内复用缓存结果。"""
         cache_key = frame_b64[:64]
         cached = self._vl_cache.get(cache_key)
         if cached is not None:
             result, ts = cached
             if time.monotonic() - ts < _VL_CACHE_TTL:
-                return result
+                return result  # 缓存命中：无真实 VL 调用，不计入 trace
 
-        response = await _vl_client.chat.completions.create(
-            model=VL_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
-                        },
-                        {
-                            "type": "text",
-                            "text": (
-                                f"请用简短的中文描述画面内容，重点回答：{question}。"
-                                "只描述画面事实，不要推测，不要问候语。"
-                            ),
-                        },
-                    ],
-                }
-            ],
+        prompt = (
+            f"请用简短的中文描述画面内容，重点回答：{question}。"
+            "只描述画面事实，不要推测，不要问候语。"
         )
-        result = response.choices[0].message.content or "无法理解画面"
+        result = await self._call_vl(frame_b64, prompt, session, "vision_passive")
         self._vl_cache[cache_key] = (result, time.monotonic())
         return result
+
+    async def describe_scene(self, frame_b64: str, session=None) -> str:
+        """主动视觉：画面变化后的定向描述，侧重人是否在场。
+
+        不走缓存——每次变化都要对「当前画面」做新鲜判断，复用旧结果会错判状态。
+        """
+        return await self._call_vl(frame_b64, SCENE_VL_PROMPT, session, "vision_active")
