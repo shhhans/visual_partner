@@ -1,7 +1,7 @@
 // 音频 I/O：麦克风采集（16kHz 上行 PCM）与 TTS 播放队列（22.05kHz 下行）。
 // 采样率两端契约见 server/config.py。
 // 二进制帧格式：前 4 字节 = 代号（uint32 LE），其余 = 16-bit 小端 PCM。
-// 移植自 web/audio.js，额外在麦克风链路挂一个 analyser 供 UI 实时音量（零延迟驱动外观）。
+// 移植自 clients/web/audio.js，额外在麦克风链路挂一个 analyser 供 UI 实时音量（零延迟驱动外观）。
 // 语音活动判定用 Silero VAD（@ricky0123/vad-web，端侧 ONNX），区分人声与键盘/敲击等瞬态噪声；
 // RMS 音量仅用于驱动律动幅度，不再作为「是否在说话」的判据。
 

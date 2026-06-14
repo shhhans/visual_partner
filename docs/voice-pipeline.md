@@ -32,8 +32,8 @@
 | ASR 封装（回调转 asyncio 事件流） | `server/voice/asr.py` |
 | TTS 封装（增量喂文本、取消） | `server/voice/tts.py` |
 | 会话编排（断句→LLM→TTS、barge-in） | `server/session.py` |
-| 麦克风采集 worklet | `web/pcm-worklet.js` |
-| 播放队列 / 打断清空 | `web/audio.js` |
+| 麦克风采集 worklet | `clients/web/pcm-worklet.js` |
+| 播放队列 / 打断清空 | `clients/web/audio.js` |
 
 ## WS 协议
 

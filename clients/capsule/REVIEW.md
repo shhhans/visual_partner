@@ -1,7 +1,7 @@
 # Codex Review 发现（2026-06-14）
 
 > 来源：Codex review 误把本未跟踪目录当成审查目标时产出的发现。与主动视觉无关，
-> 但看起来是 food-capsule-demo 自身的真实问题，先记录待修。未验证。
+> 但看起来是 capsule 前端自身的真实问题，先记录待修。未验证。
 
 ## [P1] PCM worklet 未接入活跃音频图 — `src/lib/audio.ts:54`
 

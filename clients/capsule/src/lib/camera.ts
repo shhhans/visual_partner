@@ -1,5 +1,5 @@
 // 摄像头：本地预览 + 按需抓帧（视觉链路，设计见 docs/vision-pipeline.md）。
-// 画面只在被服务端索取时上云，平时零流量。移植自 web/camera.js。
+// 画面只在被服务端索取时上云，平时零流量。移植自 clients/web/camera.js。
 
 const MAX_EDGE = 768; // qwen-vl 按图块计 token，缩图直接省钱
 const JPEG_QUALITY = 0.7;

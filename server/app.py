@@ -28,5 +28,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
     await Session(ws).run()
 
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# 调试前端（clients/web）由后端直接托管；产品形态前端 clients/capsule 独立打包运行
+WEB_DIR = Path(__file__).resolve().parent.parent / "clients" / "web"
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
