@@ -36,6 +36,13 @@ class MemoryWorker:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
+    async def recall(self, query: str, limit: int = 5, kind: str | None = None) -> list[str]:
+        """读侧入口：召回与 query 相关的记忆，供回复前回灌。
+
+        只读、不经写队列，与后台串行写互不阻塞（底层 sqlite 访问由其自身锁串行化）。
+        """
+        return await self._provider.recall(query, limit, kind)
+
     def enqueue(self, user_text: str, assistant_text: str, session_id: str) -> None:
         """非阻塞入队一个已完成回合。空回合（两端都空）直接丢弃。"""
         if not user_text and not assistant_text:
