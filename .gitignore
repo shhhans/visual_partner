@@ -6,6 +6,8 @@ venv/
 
 # 运行时产物：延迟指标库由进程启动时自建，不入库
 server/metrics.db
+# 持久化记忆库：进程运行时自建，含对话内容，不入库
+server/memory.db
 
 # 环境与密钥（API key 走环境变量，仓库内不应出现）
 .env

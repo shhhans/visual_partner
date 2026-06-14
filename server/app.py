@@ -1,15 +1,25 @@
 """FastAPI 入口：托管前端静态页 + /ws WebSocket。"""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 
 from config import DASHSCOPE_API_KEY, LLM_API_KEY
+from memory import get_worker
 from metrics import init_db
 from session import Session
 
-app = FastAPI(title="Visual Partner")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # worker 由首个 WS 连接惰性启动；退出时排空，尽量不丢未落库的回合记忆。
+    yield
+    await get_worker().stop()
+
+
+app = FastAPI(title="Visual Partner", lifespan=lifespan)
 
 # LLM/VL 走 OpenAI 兼容供应商，必须有 key（默认回落 DASHSCOPE_API_KEY）
 if not LLM_API_KEY:
