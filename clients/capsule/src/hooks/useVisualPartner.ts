@@ -250,6 +250,20 @@ export function useVisualPartner(videoRef: RefObject<HTMLVideoElement | null>): 
             setErrorMsg('连接已断开');
             setStatusSafe('error');
           }
+          // 断连后释放采样/麦克风/播放与外观循环（与 clients/web 一致）：
+          // 否则 scene interval 与 mic 会一直跑到组件卸载；且 raf 不停会把 error 态刷回 idle。
+          if (sceneTimer !== null) {
+            clearInterval(sceneTimer);
+            sceneTimer = null;
+          }
+          if (raf !== null) {
+            cancelAnimationFrame(raf);
+            raf = null;
+          }
+          mic?.stop();
+          mic = null;
+          speaker?.close();
+          speaker = null;
         };
         await new Promise<void>((resolve, reject) => {
           ws!.onopen = () => resolve();
